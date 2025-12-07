@@ -1,0 +1,131 @@
+name: Test github-actions-build-push-containers on PR and schedule
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '45 12 * * 4'
+
+permissions:
+  id-token: write
+  packages: write
+
+jobs:
+  test_action:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: set variables
+      run: |
+        # set image name, GITHUB_ENV is not available until after step completes
+        TEST_IMAGE_NAME=glueops/github-actions-build-push-containers/test-github-actions-build-push-containers
+        echo "TEST_IMAGE_NAME=$TEST_IMAGE_NAME" >> $GITHUB_ENV
+        
+        # Configure AWS Variables
+        echo "ECR_REGISTRY=616531474007.dkr.ecr.us-west-2.amazonaws.com" >> $GITHUB_ENV
+        echo "AWS_REGION=us-west-2" >> $GITHUB_ENV
+        # Use a different ecr repository to test iam path
+        echo "ECR_IAM_ROLE_TEST_IMAGE_NAME=${TEST_IMAGE_NAME}-iam-role" >> $GITHUB_ENV
+        
+        # Docker Hub has a unique naming convention
+        echo "DOCKERHUB_TEST_IMAGE_NAME=glueopsrocksv2/github-actions-build-push-containers_test-github-actions-build-push-containers" >> $GITHUB_ENV
+
+
+    - name: Checkout code
+      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
+
+
+    - name: run ghcr.io
+      uses: ./
+      with:
+        image_name: ${{ env.TEST_IMAGE_NAME }}
+        registry: "ghcr.io"
+        context: "./test-directory/tests/"
+        target_directory: test-directory
+
+    - name: test ghcr.io
+      run: |
+        echo "::group::pull from ghcr.io"
+        echo "pulling ghcr.io/$TEST_IMAGE_NAME:${{ github.sha }}"
+        docker pull ghcr.io/$TEST_IMAGE_NAME:${{ github.sha }}
+        echo "::endgroup::"
+        docker run -e REGISTRY=ghcr.io ghcr.io/$TEST_IMAGE_NAME:${{ github.sha }}
+
+
+    - name: run ecr with access keys
+      uses: ./
+      with:
+        aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws_default_region: ${{ env.AWS_REGION }}
+        image_name: ${{ env.TEST_IMAGE_NAME }}
+        registry: ${{ env.ECR_REGISTRY }}
+        context: "./test-directory/tests/"
+        target_directory: test-directory
+
+    - name: test ecr with access keys
+      run: |
+        echo "::group::log in to ecr and pull"
+        echo $(aws ecr get-login-password --region $AWS_REGION) \
+          | docker login --username AWS --password-stdin $ECR_REGISTRY
+        docker pull $ECR_REGISTRY/$TEST_IMAGE_NAME:${{ github.sha }}
+        echo "::endgroup::"
+        docker run -e "REGISTRY=dkr.ecr with Access Keys" $ECR_REGISTRY/$TEST_IMAGE_NAME:${{ github.sha }}
+
+    - name: run ecr with iam role
+      uses: ./
+      with:
+        aws_role_to_assume: ${{ secrets.AWS_ROLE_ARN }}
+        aws_default_region: ${{ env.AWS_REGION }}
+        image_name: ${{ env.ECR_IAM_ROLE_TEST_IMAGE_NAME }}
+        registry: ${{ env.ECR_REGISTRY }}
+        context: "./test-directory/tests/"
+        target_directory: test-directory
+
+    - name: test ecr with iam role
+      run: |
+        echo "::group::log in to ecr and pull"
+        echo $(aws ecr get-login-password --region $AWS_REGION) \
+          | docker login --username AWS --password-stdin $ECR_REGISTRY
+        docker pull $ECR_REGISTRY/$ECR_IAM_ROLE_TEST_IMAGE_NAME:${{ github.sha }}
+        echo "::endgroup::"
+        docker run -e "REGISTRY=dkr.ecr with IAM Role" $ECR_REGISTRY/$ECR_IAM_ROLE_TEST_IMAGE_NAME:${{ github.sha }}
+
+    - name: run docker hub
+      uses: ./
+      with:
+        dockerhub_username: ${{ secrets.DOCKERHUB_USERNAME }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_PASSWORD }}
+        image_name: ${{ env.DOCKERHUB_TEST_IMAGE_NAME }}
+        registry: "docker.io"
+        context: "./test-directory/tests/"
+        target_directory: test-directory
+
+    - name: test docker hub
+      run: |
+        echo "::group::log in to docker.io and pull"
+        echo "${{ secrets.DOCKERHUB_PASSWORD }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+        docker pull $DOCKERHUB_TEST_IMAGE_NAME:${{ github.sha }}
+        echo "::endgroup::"
+        docker run -e REGISTRY=docker.io $DOCKERHUB_TEST_IMAGE_NAME:${{ github.sha }}
+
+    - name: generate epoch time string for custom tag
+      id: epoch-tag
+      run: echo "EPOCH_TAG=$(date +%s)" >> $GITHUB_ENV
+
+    - name: run ghcr.io with custom tag
+      uses: ./
+      with:
+        image_name: ${{ env.TEST_IMAGE_NAME }}
+        registry: "ghcr.io"
+        tags: ${{ env.EPOCH_TAG }}
+        context: "./test-directory/tests/"
+        target_directory: test-directory
+
+    - name: test ghcr.io with custom tag
+      run: |
+        echo "::group::pull from ghcr.io"
+        echo "pulling ghcr.io/$TEST_IMAGE_NAME:${{ env.EPOCH_TAG }}"
+        docker pull ghcr.io/$TEST_IMAGE_NAME:${{ env.EPOCH_TAG }}
+        echo "::endgroup::"
+        docker run -e REGISTRY="ghcr.io with custom tag" ghcr.io/$TEST_IMAGE_NAME:${{ env.EPOCH_TAG }}
